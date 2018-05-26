@@ -1,0 +1,57 @@
+%spark
+import java.nio.charset.StandardCharsets
+import scala.collection.mutable.ListBuffer
+import org.apache.spark.SparkConf
+import org.apache.spark.SparkContext
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.SQLContext
+import org.apache.spark.sql.hive.HiveContext
+import org.apache.spark.storage.StorageLevel
+import org.apache.spark.streaming.{Seconds, StreamingContext}
+import org.apache.nifi.remote.client.SiteToSiteClient
+import org.apache.nifi.remote.client.SiteToSiteClientConfig
+import org.apache.nifi.spark.NiFiReceiver
+import org.apache.nifi.spark.NiFiDataPacket
+import java.lang.System.currentTimeMillis
+
+val clientConfig = new SiteToSiteClient.Builder()
+                        .url("http://18.233.203.216:9990/nifi/")
+                        .portName("Twitter-Trends")
+                        .buildConfig();
+val ssc = new StreamingContext(sc, Seconds(10))
+ //ssc.checkpoint("/tmp/Spark_Steaming_checkpoint")
+val tweetDataPackeStreamt = ssc.receiverStream(new NiFiReceiver(clientConfig, StorageLevel.MEMORY_ONLY))
+
+
+ val tweetTextUtf = tweetDataPackeStreamt.map(tweetUtf =>  new String(tweetUtf.getContent, StandardCharsets.UTF_8))
+val hashTagLineRDD = tweetTextUtf.map(tweet => {
+      val tweetwords = tweet.split(" ")
+      val hashtag = tweetwords.filter(word => word.startsWith("#"))
+      // to manage data effectively in Hive ( as majority of data did not have HASHTAGS)
+       if(hashtag.length == 0 )
+            (  null , tweet, "NO_HASHTAG")
+      else
+            ( hashtag(0) ,  tweet , "HAS_HASHTAG")
+    })
+
+
+    
+    case class TweetRecordHashTags(time: Long, hashtag :  String, tweet : String , hashashtag: String )
+    import java.lang.System.currentTimeMillis
+    // Add timestamp to data as it arises
+    hashTagLineRDD.map(rdd=> TweetRecordHashTags(currentTimeMillis(), rdd._1,rdd._2, rdd._3))
+
+    // Configuration for Hive
+    val sqlContext = new SQLContext(ssc.sparkContext)
+    val hiveContext = new HiveContext(ssc.sparkContext)
+    import hiveContext.implicits._
+     hiveContext.setConf("hive.exec.dynamic.partition", "true")
+    hiveContext.setConf("hive.exec.dynamic.partition.mode", "nonstrict")
+    //sqlContext.setConf("hive.exec.max.dynamic.partitions.pernode",Int(1000))
+    hiveContext.setConf("hive.enforce.bucketing","true")
+
+    hashTagLineRDD.foreachRDD { (rdd: RDD[(String, String, String)]) => 
+            rdd.map( t =>  TweetRecordHashTags (currentTimeMillis(), t._1, t._2,t._3)).
+            toDF().write.mode("append").partitionBy("hashashtag").insertInto("exercise2.live_tweets_hashtags_bucket")
+                             }
+ ssc.start()

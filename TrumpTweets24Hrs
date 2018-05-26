@@ -1,0 +1,82 @@
+%spark
+import java.nio.charset.StandardCharsets
+import scala.collection.mutable.ListBuffer
+import org.apache.spark.SparkConf
+import org.apache.spark.SparkContext
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.hive.HiveContext
+import org.apache.spark.storage.StorageLevel
+import org.apache.spark.streaming.{Seconds, StreamingContext, Time}
+import org.apache.nifi.remote.client.SiteToSiteClient
+import org.apache.nifi.remote.client.SiteToSiteClientConfig
+import org.apache.nifi.spark.NiFiReceiver
+import org.apache.nifi.spark.NiFiDataPacket
+import java.lang.System.currentTimeMillis
+import org.codehaus.jackson.JsonNode
+import org.codehaus.jackson.map.ObjectMapper
+
+
+
+case class TweetRecord(time: org.apache.spark.streaming.Time, candidate: String, count: Integer)
+val clientConfig = new SiteToSiteClient.Builder()
+                        .url("http://18.233.203.216:9990/nifi/")
+                        .portName("Trump-Talk")
+                        .buildConfig();
+val ssc = new StreamingContext(sc, Seconds(10))
+val tweetDataPackeStreamt = ssc.receiverStream(new NiFiReceiver(clientConfig, StorageLevel.MEMORY_ONLY))
+
+
+val tweetTextUtf = tweetDataPackeStreamt.map(tweetUtf => {
+        val line = new String(tweetUtf.getContent(), StandardCharsets.UTF_8)
+    line
+})
+    
+val statusLines = tweetTextUtf.map(line=>line)
+    
+    val sentiments = tweetTextUtf.map((line) => {
+    val positive = List("abundance", "Happy", "proud", "win", "smile", "laugh","lol","cheers", "Love", "good")
+    val negative = List("racist","sad", "gun","hurt","bad", "killed", "die", "problem", "sorry", "death","loss","losses","mean","traitor")
+    var st =0
+    val tweetwords = line.split(" ")
+
+      positive.foreach(p=>
+          if(line.toLowerCase().contains(p.toLowerCase))
+            {
+              println(s"======> Positive $line ")
+              st = st+1
+            }
+      )
+       negative.foreach(n=>
+         if(line.toLowerCase().contains(n.toLowerCase))
+         {
+           println(s"======> Negtive $line ")
+           st = st-1
+         }
+       )
+
+      if(st>0)
+        (line, "positive")
+      else if(st<0)
+        (line, "negative")
+      else
+        (line, "neutral")
+    })
+
+    case class TweetSentiments(time: Long, line: String, sentiment: String)
+    import java.lang.System.currentTimeMillis
+    sentiments.map(rdd=> TweetSentiments(currentTimeMillis(), rdd._1,rdd._2))
+    
+     val hiveContext = new HiveContext(ssc.sparkContext)
+    import hiveContext.implicits._
+     hiveContext.setConf("hive.exec.dynamic.partition", "true")
+    hiveContext.setConf("hive.exec.dynamic.partition.mode", "nonstrict")
+    import hiveContext.implicits._
+    sentiments.foreachRDD { (rdd: RDD[(String, String)], time: org.apache.spark.streaming.Time) => rdd.map( t =>
+      TweetSentiments (currentTimeMillis(), t._1, t._2)).toDF().write.mode("append").partitionBy("sentiment").insertInto("exercise2.trump_tweet_sentiments")
+     // TweetSentiments (currentTimeMillis(), t._1, t._2)).collect().foreach(println)
+
+    }
+    
+    
+
+ ssc.start()

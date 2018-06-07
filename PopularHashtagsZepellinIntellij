@@ -1,0 +1,78 @@
+package com.eva.test
+
+import com.eva.test.Utilities.{setupLogging, setupTwitter}
+import org.apache.spark.{SparkConf, SparkContext}
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.SQLContext
+import org.apache.spark.sql.hive.HiveContext
+import org.apache.spark.streaming.twitter.TwitterUtils
+import org.apache.spark.streaming.{Seconds, StreamingContext}
+
+/** Listens to a stream of Tweets and keeps track of the most popular
+  *  hashtags over a 5 minute window.
+  */
+object PopularHashtagsZepellin {
+
+  /** Our main function where the action happens */
+  def main(args: Array[String]) {
+
+    // Configure Twitter credentials using twitter.txt
+    setupTwitter()
+
+    // Set up a Spark streaming context named "PopularHashtags" that runs locally using
+    // all CPU cores and one-second batches of data
+    val ssc = new StreamingContext("local[*]", "PopularHashtags", Seconds(1))
+    // Get rid of log spam (should be called after the context is set up)
+    setupLogging()
+
+    // Create a DStream from Twitter using our streaming context
+    val tweets = TwitterUtils.createStream(ssc, None)
+
+
+
+    // Now extract the text of each status update into DStreams using map()
+    val statuses = tweets.map(status => status.getText())
+
+    // Blow out each word into a new DStream
+    val tweetwords = statuses.flatMap(tweetText => tweetText.split(" "))
+
+    // Now eliminate anything that's not a hashtag
+    val hashtags = tweetwords.filter(word => word.startsWith("#"))
+
+    // Map each hashtag to a key/value pair of (hashtag, 1) so we can count them up by adding up the values
+    val hashtagKeyValues = hashtags.map(hashtag => (hashtag, 1))
+
+    // Now count them up over a 5 minute window sliding every one second
+    val hashtagCounts = hashtagKeyValues.reduceByKeyAndWindow( (x,y) => x + y, (x,y) => x - y, Seconds(300), Seconds(1))
+    //  You will often see this written in the following shorthand:
+    //val hashtagCounts = hashtagKeyValues.reduceByKeyAndWindow( _ + _, _ -_, Seconds(300), Seconds(1))
+
+    // Sort the results by the count values
+    val sortedResults = hashtagCounts.transform(rdd => rdd.sortBy(x => x._2, false))
+
+    case class TweetRecordHashTags(time: Long, hashtags: String, counter: Long)
+    import java.lang.System.currentTimeMillis
+
+    sortedResults.map(rdd=> TweetRecordHashTags(currentTimeMillis(), rdd._1,rdd._2))
+
+
+
+
+    val hiveContext = new HiveContext(ssc.sparkContext)
+    import hiveContext.implicits._
+    sortedResults.foreachRDD { (rdd: RDD[(String, Int)], time: org.apache.spark.streaming.Time) => rdd.map( t =>
+      TweetRecordHashTags (currentTimeMillis(), t._1, t._2)).toDF().write.mode("overwrite").partitionBy().insertInto("")
+      //TweetRecordHashTags (currentTimeMillis(), t._1, t._2)).collect().foreach(println)
+
+    }
+
+    // Print the top 10
+    //sortedResults.print
+
+    // Set a checkpoint directory, and kick it all off
+    // I could watch this all day!
+    ssc.checkpoint("checkpoint/")
+    ssc.start()
+    ssc.awaitTermination()
+  }
+}
